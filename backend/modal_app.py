@@ -3,6 +3,8 @@
 Setup 01 skeleton: web endpoint with /api/health, plus smoke functions that prove the Blender and
 Chromium images.
   uv run modal run modal_app.py::smoke     build all images, run the smoke checks
+  uv run modal run modal_app.py::guide_spike   F-01 slice 1: guide sheets for the painting spike
+  uv run modal run modal_app.py::rig_spike     F-01 slice 1: guide frames + pixel maps for the 2D rig test
   uv run modal serve modal_app.py          dev URL with hot reload
   uv run modal deploy modal_app.py         live URL
 """
@@ -31,6 +33,8 @@ blender_image = (
     modal.Image.debian_slim(python_version=PY)
     .apt_install("xorg", "libxkbcommon0")  # bpy runtime libs (Modal Blender example)
     .uv_pip_install("bpy==5.2.3")
+    .add_local_dir(HERE / "assets" / "quaternius", "/assets/quaternius", ignore=["_download", "_download/**"])
+    .add_local_python_source("lote")
 )
 
 playtest_image = (
@@ -137,6 +141,103 @@ async def playtest_smoke() -> dict:
         version = browser.version
         await browser.close()
     return {"chromium": version, "jpeg": png, "qa_lines": seen}
+
+
+@app.function(image=blender_image, cpu=2, memory=4096, timeout=900)
+def render_spike_guides() -> dict:
+    """F-01 spike: humanoid + hand-written quadruped guide frames, S/E/N, idle 4 + walk 8."""
+    from lote.guides.spike import render_all
+
+    return render_all()
+
+
+@app.local_entrypoint()
+def guide_spike():
+    """Writes runs/spike/guides/<body>/: sheet_{s,e,n}.png, mask_{s,e,n}.png, turnaround.png, anchors.json."""
+    import json
+
+    from lote.guides.spike import assemble
+
+    key = (255, 0, 255)  # spike key color: magenta (a run picks its own later, spec.md > Understand stage)
+    out = HERE / "runs" / "spike" / "guides"
+    out.mkdir(parents=True, exist_ok=True)
+    result = render_spike_guides.remote()
+    report = {"blender": result["blender"], "key_rgb": key}
+    for body in ("humanoid", "quadruped"):
+        frames, checks = result[body]["frames"], result[body]["checks"]
+        report[body] = checks
+        if not checks["ok"]:
+            print(f"[FAIL] {body}: {checks.get('error')}")
+            continue
+        sheet = assemble(frames, key)
+        d = out / body
+        d.mkdir(parents=True, exist_ok=True)
+        for k, png in sheet["sheets"].items():
+            (d / f"sheet_{k}.png").write_bytes(png)
+        for k, png in sheet["masks"].items():
+            (d / f"mask_{k}.png").write_bytes(png)
+        (d / "turnaround.png").write_bytes(sheet["turnaround"])
+        (d / "anchors.json").write_text(json.dumps(sheet["anchors"], indent=1))
+        print(f"[OK] {body}: {len(frames)} frames in {checks['seconds']}s -> {d}")
+    (out / "checks.json").write_text(json.dumps(report, indent=2, default=str))
+    h, q = report["humanoid"], report["quadruped"]
+    skin = q.get("skin_armature_create", {})
+    print(f"[{'OK' if h.get('ual1_used') else 'FAIL'}] UAL1 clips used: {h.get('ual1_used')}")
+    print(f"[{'OK' if skin.get('ok') else 'FAIL'}] skin_armature_create: {skin}")
+    print(f"[{'OK' if q.get('skin_applied_faces') else 'FAIL'}] Skin modifier applied: "
+          f"{q.get('skin_applied_faces')} faces; bone map {q.get('skin_bone_map')}")
+    print(f"Blender {result['blender']}. Checks in {out / 'checks.json'}")
+
+
+@app.function(image=blender_image, cpu=2, memory=4096, timeout=900)
+def render_rig_guides() -> dict:
+    """F-01 spike (L-076): humanoid guide frames + rest → frame pixel maps for the 2D rig test."""
+    from lote.guides.rig_spike import render_rig
+
+    return render_rig()
+
+
+@app.local_entrypoint()
+def rig_spike():
+    """Writes runs/spike/rig/guides/: sheet_/mask_{s,e,n}.png, anchors.json, rig.npz, checks.json."""
+    import json
+
+    import numpy as np
+
+    from lote.guides.spike import assemble
+
+    out = HERE / "runs" / "spike" / "rig" / "guides"
+    out.mkdir(parents=True, exist_ok=True)
+    result = render_rig_guides.remote()
+    sheet = assemble(result["frames"], (255, 0, 255))
+    for k, png in sheet["sheets"].items():
+        (out / f"sheet_{k}.png").write_bytes(png)
+    for k, png in sheet["masks"].items():
+        (out / f"mask_{k}.png").write_bytes(png)
+    (out / "turnaround.png").write_bytes(sheet["turnaround"])
+    (out / "anchors.json").write_text(json.dumps(sheet["anchors"], indent=1))
+    arrays = {}
+    for d, r in result["rig"].items():
+        arrays[f"gyx_{d}"] = r["gyx"]
+        arrays[f"grid_{d}"] = np.array(r["grid"])
+        for key, m in r["maps"].items():
+            arrays[f"map_{key}"] = m
+        for key, b in r["back"].items():
+            for part, v in b.items():
+                arrays[f"back_{part}_{key}"] = v
+    np.savez_compressed(out / "rig.npz", **arrays)
+    checks = result["checks"]
+    (out / "checks.json").write_text(json.dumps(checks, indent=2, default=str))
+    for d in result["rig"]:
+        rays, proj = checks[f"rays_{d}"], checks[f"projection_error_px_{d}"]
+        self_err, back_err = checks[f"rest_self_error_px_{d}"], checks[f"rest_back_error_px_{d}"]
+        hidden = max(v["hidden"] for v in checks[f"back_{d}"].values())
+        mirror = max(v["mirror"] for v in checks[f"back_{d}"].values())
+        ok = rays["hits"] > 1000 and proj < 1 and self_err < 1 and back_err < 2
+        print(f"[{'OK' if ok else 'FAIL'}] {d}: {rays['hits']} surface samples in {rays['seconds']}s, "
+              f"projection error {proj} px, rest maps onto itself within {self_err} / {back_err} px; "
+              f"worst frame: mirror {mirror:.0%}, hidden {hidden:.0%}")
+    print(f"Blender {result['blender']}, {checks['seconds']}s. Files in {out}")
 
 
 @app.local_entrypoint()
