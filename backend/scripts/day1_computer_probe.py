@@ -4,8 +4,9 @@ Round 1 (L-038): Wonder answers without tools; Wonder + computer → "Unsupporte
 Spark + computer → "native computer input is too large to store" with a 2.2 MB 1600x1600 PNG screenshot.
 Round 2 (this version): a realistic 1280x720 JPEG screenshot, stored and stateless, Spark and Wonder.
 
-Run from backend/:  uv run --env-file .env python scripts/day1_computer_probe.py
+Run from backend/:  uv run --env-file .env python scripts/day1_computer_probe.py [--wonder-only]
 Builds the screenshot from runs/day1/image_0.png. Expected cost: under $0.05.
+Failed calls print the UTC timestamp and request ID for a Meta support ticket.
 """
 
 import asyncio
@@ -14,6 +15,7 @@ import io
 import os
 import sys
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 from openai import AsyncOpenAI
@@ -53,6 +55,12 @@ async def probe(client: AsyncOpenAI, name: str, **kwargs) -> None:
                 print(f"       computer_call: {o.model_dump_json()[:400]}")
     except Exception as e:  # noqa: BLE001 - probe reports every failure
         print(f"[FAIL] {name} ({time.perf_counter() - t0:.1f}s): {e!r}")
+        # What Meta support asks for: request ID and timestamp of each failed call (L-052).
+        response = getattr(e, "response", None)
+        headers = response.headers.items() if response is not None else []
+        ids = {k: v for k, v in headers if "id" in k.lower()}
+        print(f"       at {datetime.now(UTC).isoformat(timespec='seconds')}, "
+              f"request_id {getattr(e, 'request_id', None)}, id headers {ids}")
 
 
 async def main() -> int:
@@ -66,12 +74,13 @@ async def main() -> int:
     shot = screenshot_url()
     computer = [{"type": "computer"}]
 
-    await probe(client, "C spark + computer, stored", model="muse-spark-1.3", tools=computer,
-                input=content(shot))
-    await probe(client, "D spark + computer + truncation auto", model="muse-spark-1.3", tools=computer,
-                truncation="auto", input=content(shot))
-    await probe(client, "E spark + computer, stateless", model="muse-spark-1.3", tools=computer,
-                store=False, input=content(shot))
+    if "--wonder-only" not in sys.argv:
+        await probe(client, "C spark + computer, stored", model="muse-spark-1.3", tools=computer,
+                    input=content(shot))
+        await probe(client, "D spark + computer + truncation auto", model="muse-spark-1.3", tools=computer,
+                    truncation="auto", input=content(shot))
+        await probe(client, "E spark + computer, stateless", model="muse-spark-1.3", tools=computer,
+                    store=False, input=content(shot))
     await probe(client, "F wonder + computer, stored", model="muse-wonder-1.0", tools=computer,
                 input=content(shot))
     await probe(client, "G wonder + computer, stateless", model="muse-wonder-1.0", tools=computer,
