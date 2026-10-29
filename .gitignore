@@ -218,3 +218,15 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Lote
+.env.*
+!.env.example
+runs/
+node_modules/
+frontend/dist/
+*.tsbuildinfo
+.modal.toml
+
+setup
+backend/assets/quaternius/_download/
